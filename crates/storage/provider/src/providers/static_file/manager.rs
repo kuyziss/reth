@@ -1040,6 +1040,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
         &self,
         segment: StaticFileSegment,
         segment_max_block: Option<BlockNumber>,
+        header: Option<&SegmentHeader>,
     ) -> ProviderResult<()> {
         debug!(
             target: "providers::static_file",
@@ -1056,11 +1057,8 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
                     indexes.get(segment).map(|index| &index.expected_block_ranges_by_max_block),
                     segment_max_block,
                 );
-
-                let jar = NippyJar::<SegmentHeader>::load(
-                    &self.path.join(segment.filename(&fixed_range)),
-                )
-                .map_err(ProviderError::other)?;
+                let current_block_range = header.and_then(SegmentHeader::block_range);
+                let tx_range = header.and_then(SegmentHeader::tx_range);
 
                 let index = indexes
                     .entry(segment)
@@ -1104,7 +1102,7 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
                 // 2. Sync to block 100, this update sets min_block = [0..=100]
                 // 3. Pruner calls get_lowest_static_file_block() -> returns 100 (correct). Without
                 //    this update, it would incorrectly return 0 (stale)
-                if let Some(current_block_range) = jar.user_header().block_range() {
+                if let Some(current_block_range) = current_block_range {
                     if let Some(min_block_range) = index.min_block_range.as_mut() {
                         // delete_jar WILL ALWAYS re-initialize all indexes, so we are always
                         // sure that current_min is always the lowest.
@@ -1118,10 +1116,10 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
 
                 // Updates the tx index by first removing all entries which have a higher
                 // block_start than our current static file.
-                if let Some(tx_range) = jar.user_header().tx_range() {
+                if let Some(tx_range) = tx_range {
                     // Current block range has the same block start as `fixed_range``, but block end
                     // might be different if we are still filling this static file.
-                    if let Some(current_block_range) = jar.user_header().block_range() {
+                    if let Some(current_block_range) = current_block_range {
                         let tx_end = tx_range.end();
 
                         // Considering that `update_index` is called when we either append/truncate,
@@ -1153,9 +1151,16 @@ impl<N: NodePrimitives> StaticFileProvider<N> {
                     index.available_block_ranges_by_max_tx.take_if(|index| index.is_empty());
                 }
 
-                // Update the cached provider.
-                debug!(target: "providers::static_file", ?segment, "Inserting updated jar into cache");
-                self.map.insert((fixed_range.end(), segment), LoadedJar::new(jar)?);
+                // Keep writer-side index updates cheap by only reopening the jar when a reader
+                // already has this range cached. Otherwise the next read will lazily load it.
+                if self.map.contains_key(&(fixed_range.end(), segment)) {
+                    let jar = NippyJar::<SegmentHeader>::load(
+                        &self.path.join(segment.filename(&fixed_range)),
+                    )
+                    .map_err(ProviderError::other)?;
+                    debug!(target: "providers::static_file", ?segment, "Inserting updated jar into cache");
+                    self.map.insert((fixed_range.end(), segment), LoadedJar::new(jar)?);
+                }
 
                 // Delete any cached provider that no longer has an associated jar.
                 debug!(target: "providers::static_file", ?segment, "Cleaning up jar map");

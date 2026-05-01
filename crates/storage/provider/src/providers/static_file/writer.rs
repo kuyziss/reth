@@ -723,7 +723,7 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
                 prev_path.exists().then_some(prev_block)
             });
 
-        self.reader().update_index(segment, segment_max_block)
+        self.reader().update_index(segment, segment_max_block, Some(self.writer.user_header()))
     }
 
     /// Ensures that the writer is positioned at the specified block number.
